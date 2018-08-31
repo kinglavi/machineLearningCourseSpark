@@ -1,28 +1,28 @@
-import six
 from pyspark.ml.evaluation import RegressionEvaluator
-from pyspark.ml.feature import VectorAssembler
+from pyspark.ml.feature import VectorAssembler, StringIndexer
 from pyspark.ml.regression import LinearRegression
+from pyspark.sql.functions import monotonically_increasing_id
 
 from general_utils.spark_connector import init_spark
+from general_utils.statistic_utils import show_stats, show_correlation
+from models.linear_regression_model import build_linear_regression_model, create_feature_column
 from preprocess_steps.add_age_column import add_age_column
 from preprocess_steps.age_range_column import add_age_range_column
 from preprocess_steps.column_to_boolean import gender_column_to_0_1_2
 from preprocess_steps.divide_day_time import divide_day_time_step
 from preprocess_steps.replace_nulls import replace_null_with_average
-import pandas
-
 from preprocess_steps.split_date_to_columns import split_date_to_columns
 from preprocess_steps.station_distance_column import station_distance_column
 from preprocess_steps.user_type_column_to_numeric import user_type_column_to_numeric
 
 
-def main():
-    spark, sc = init_spark()
-
-    observation_df = spark.read.load(
-        "./2017-fordgobike-tripdata.csv",
+def read_data(spark, csv_file_path):
+    return spark.read.load(
+        csv_file_path,
         format='com.databricks.spark.csv', header='true', inferSchema='true')
 
+
+def pre_process(observation_df):
     observation_df = split_date_to_columns(observation_df, 'start_time')
 
     observation_df = split_date_to_columns(observation_df, 'end_time')
@@ -38,72 +38,68 @@ def main():
     observation_df = add_age_range_column(observation_df)
 
     # Remove rows with gender null # TODO: maybe do not remove those rows.
-    observation_df = observation_df.na.drop(subset=['member_gender'])
+    # observation_df = observation_df.na.drop(subset=['member_gender'])
 
-    observation_df = gender_column_to_0_1_2(observation_df)
+    # observation_df = gender_column_to_0_1_2(observation_df)
 
     observation_df = station_distance_column(observation_df)
 
-    observation_df = user_type_column_to_numeric(observation_df)
-
     # TODO: remove column with age bigger than 120
 
-    # df = show_stats(observation_df)
+    indexer = StringIndexer(inputCol="user_type", outputCol="user_type_number")
+    observation_df = indexer.fit(observation_df).transform(observation_df)
 
-    numeric_columns = [column[0] for column in observation_df.dtypes if column[1] in
-                       ['bigint', 'double', 'int', 'float']]
+    return observation_df
+
+
+INPUT_FILE_DATA_PATH = "./2017-fordgobike-tripdata.csv"
+OUTPUT_FILE_DATA_PATH = "./201801-fordgobike-tripdata.csv"
+
+
+def main():
+    spark, sc = init_spark()
+
+    observation_df = read_data(spark, INPUT_FILE_DATA_PATH)
+    observation_df = pre_process(observation_df)
+
     observation_df.persist()
-    # for column in numeric_columns:
-    #     if not (isinstance(observation_df.select(column).take(1)[0][0], six.string_types)):
-    #         print("Correlation to duration_sec for ", column, observation_df.stat.corr('duration_sec', column))
 
-    vector_assembler = VectorAssembler(
-        inputCols=numeric_columns,
-        outputCol='features')
-    vector_observation_df = vector_assembler.transform(observation_df)
-    vector_observation_df = vector_observation_df.select(['features', 'duration_sec'])
-    vector_observation_df.show(3)
+    # status_df = show_stats(observation_df)
 
-    splits = vector_observation_df.randomSplit([0.7, 0.3])
-    train_df = splits[0]
-    test_df = splits[1]
+    feature_columns = [column[0] for column in observation_df.dtypes if column[1] in
+                       ['bigint', 'double', 'int', 'float']]
 
-    lr = LinearRegression(
-        featuresCol='features', labelCol='duration_sec',
-        maxIter=10, regParam=0.3, elasticNetParam=0.8)
+    # Remove not useful columns
+    remove_features = [
+            'duration_sec', 'member_birth_year', 'member_gender',
+            'bike_id', 'start_station_id'
+        ]
+    feature_columns = [feature for feature in feature_columns if feature not in remove_features]
 
-    lr_model = lr.fit(train_df)
-    print("Coefficients: " + str(lr_model.coefficients))
-    print("Intercept: " + str(lr_model.intercept))
+    # Just to watch with features has high correlation
+    # show_correlation(observation_df, feature_columns)
 
-    training_summary = lr_model.summary
-    print("RMSE: %f" % training_summary.rootMeanSquaredError)
-    print("r2: %f" % training_summary.r2)
+    lr_model = build_linear_regression_model(observation_df, feature_columns=feature_columns)
 
-    train_df.describe().show()
+    new_bike_data_unchanged = read_data(spark, OUTPUT_FILE_DATA_PATH)
+    # New data has already duration_sec column so we should drop it..
+    new_bike_data = new_bike_data_unchanged.drop("duration_sec")
+    new_bike_data = pre_process(new_bike_data)
+    new_bike_data.persist()
 
-    lr_predictions = lr_model.transform(test_df)
-    lr_predictions.select("prediction", "duration_sec", "features").show(5)
+    new_bike_data_vector = create_feature_column(
+        new_bike_data, feature_columns, ['features'])
 
-    lr_evaluator = RegressionEvaluator(
-        predictionCol="prediction",
-        labelCol="duration_sec", metricName="r2")
-    print("R Squared (R2) on test data = %g" % lr_evaluator.evaluate(lr_predictions))
+    predictions = lr_model.transform(new_bike_data_vector)
+    predictions.select("prediction", "features").show()
 
-    test_result = lr_model.evaluate(test_df)
-    print("Root Mean Squared Error (RMSE) on test data = %g" % test_result.rootMeanSquaredError)
+    predictions = predictions.withColumn('id', monotonically_increasing_id())
+    new_bike_data_unchanged = new_bike_data_unchanged.withColumn('id', monotonically_increasing_id())
+    new_bike_data_predicted = new_bike_data_unchanged.join(predictions, 'id', "outer")
 
-    print("numIterations: %d" % training_summary.totalIterations)
-    print("objectiveHistory: %s" % str(training_summary.objectiveHistory))
-    training_summary.residuals.show()
+    new_bike_data_predicted.write.csv("./predicted_2018_bika_data.csv")
 
-    predictions = lr_model.transform(test_df)
-    predictions.select("prediction", "duration_sec", "features").show()
-
-
-def show_stats(df):
-    pandas_df = df.describe().toPandas().transpose()
-    return pandas_df
+    pass
 
 
 if __name__ == '__main__':
