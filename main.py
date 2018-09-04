@@ -9,7 +9,7 @@ from steps.reader import read_data, read_new_data_and_pre_process
 
 INPUT_FILE_DATA_PATH = "./2017-fordgobike-tripdata.csv"
 NEW_DATA_FILE_PATH = "./201801-fordgobike-tripdata.csv"
-PREDICT_RESULT_FILE_PATH = "./201801-fordgobike-tripdata-predictions.csv"
+PREDICT_RESULT_FILE_PATH = "./201801-fordgobike-tripdata-predictions"
 
 
 def main():
@@ -49,9 +49,10 @@ def main():
 
     new_bike_data_predicted = marge_two_df_by_order(predictions, new_bike_data_unchanged)
 
+    new_bike_data_predicted.toPandas().to_csv(PREDICT_RESULT_FILE_PATH)
     new_bike_data_predicted.write.csv(PREDICT_RESULT_FILE_PATH, header=True)
 
-    print("Wrote predicted data")
+    print("Successfully wrote predicted data to file.")
 
 
 if __name__ == '__main__':
