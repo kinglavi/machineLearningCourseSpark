@@ -36,3 +36,6 @@ write the result file to new csv - "201801-fordgobike-tripdata-predictions.csv"
         R2 on test data = 0.622555 
 5. read the new data and run the model on it.
 6. merge the prediction and write it to csv - "201801-fordgobike-tripdata-predictions.csv"
+
+# running 
+Run the main.py file with no parameters. ( notice - you should config to work with your own spark)
